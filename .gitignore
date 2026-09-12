@@ -1,0 +1,7 @@
+node_modules/
+test-results/
+
+# Local regression tests
+/package.json
+/package-lock.json
+/tests/

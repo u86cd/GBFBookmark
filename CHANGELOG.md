@@ -1,5 +1,9 @@
 # Changelog
 
+## v7.1.9
+- Fix panel sizing, docking and dragging issues.
+- Improve storage and shortcut handling.
+
 ## v7.1.8
 - Fixed CSS selector leakage so the GBF page list layout is no longer affected.
 
