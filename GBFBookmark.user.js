@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GBF Panel Pro
 // @namespace    gbf.panel.pro
-// @version      7.1.9
+// @version      7.1.10
 // @match        *://steam.granbluefantasy.com/*
 // @match        *://gbf.game.mbga.jp/*
 // @match        *://game.granbluefantasy.jp/*
@@ -21,13 +21,14 @@
   const DOCK_SNAP = 6;
   const EDGES = ['left', 'right', 'top', 'bottom'];
   const state = { x: 50, y: 120, activeList: 'raid', dockEdge: null,
-    opacity: 100, idleSec: 5, idleMode: false, keymapEnabled: false };
+    opacity: 100, idleSec: 5, idleMode: false, keymapEnabled: false, collapsed: false, pinned: false };
   let data = {
     main: [{ name: '首页', url: '#mypage', keymap: '' }],
     raid: [{ name: 'EX+', url: '#quest/ex', keymap: '' }, { name: 'HELL', url: '#quest/hell', keymap: '' }]
   };
   let panel, settingsOpen = false, idleActive = false, hovering = false, drag = null;
-  let idleTimer = null, idleGeneration = 0, layoutFrame = 0, suppressClickUntil = 0;
+  let idleTimer = null, idleDeadline = null, idleGeneration = 0, layoutFrame = 0, suppressClickUntil = 0;
+  let windowFocused = document.hasFocus();
   let storageBlocked = false, dataSnapshot = null, dialogSnapshot = null;
   let dialogReturnFocus = null;
   let lastWidth = PANEL_W, lastHeight = 0;
@@ -64,9 +65,10 @@
     for (const key of ['x', 'y']) if (Number.isFinite(value[key])) state[key] = value[key];
     if (value.activeList === 'main' || value.activeList === 'raid') state.activeList = value.activeList;
     state.dockEdge = value.docked === false ? null : EDGES.includes(value.dockEdge) ? value.dockEdge : null;
-    for (const key of ['idleMode', 'keymapEnabled']) if (typeof value[key] === 'boolean') state[key] = value[key];
+    for (const key of ['idleMode', 'keymapEnabled', 'pinned']) if (typeof value[key] === 'boolean') state[key] = value[key];
     if (Number.isFinite(value.opacity)) state.opacity = clampValue(value.opacity, 10, 100);
     if (Number.isFinite(value.idleSec)) state.idleSec = clampValue(value.idleSec, 1, 15);
+    state.collapsed = value.collapsed === true && state.idleMode && !!state.dockEdge;
   }
 
   function load() {
@@ -160,7 +162,7 @@
       if (state.dockEdge === 'top') state.y = 0;
       if (state.dockEdge === 'bottom') state.y = Math.max(0, ch - height);
     }
-    const collapsed = idleActive && !hovering && !panel.contains(document.activeElement) && !interactionOpen();
+    const collapsed = idleActive && !panelEngaged() && !interactionOpen();
     const vertical = state.dockEdge === 'left' || state.dockEdge === 'right';
     let x = state.x, y = state.y;
     if (collapsed && state.dockEdge === 'right') x = Math.max(0, cw - IDLE_THIN * scale);
@@ -178,8 +180,15 @@
     panel.dataset.dockEdge = state.dockEdge || '';
     panel.querySelector('.title').classList.toggle('idle-mode-on', state.idleMode);
     panel.querySelector('.title').setAttribute('aria-pressed', String(state.idleMode));
+    panel.dataset.pinned = String(state.pinned);
+    const pin = panel.querySelector('.pin');
+    pin.setAttribute('aria-pressed', String(state.pinned));
+    pin.title = state.pinned ? '解除固定' : '固定位置';
+    pin.setAttribute('aria-label', pin.title);
     shell.inert = collapsed;
     shell.setAttribute('aria-hidden', String(collapsed));
+    // Persist what is visible, including temporary hover/focus expansion.
+    if (state.collapsed !== collapsed) { state.collapsed = collapsed; saveState(); }
   }
 
   function scheduleLayout() {
@@ -197,16 +206,28 @@
   function interactionOpen() {
     return !!(drag || settingsOpen || document.getElementById('gbf-dialog-overlay') || document.getElementById('gbf-ctx'));
   }
-  function clearIdleTimer() { clearTimeout(idleTimer); idleTimer = null; idleGeneration++; }
-  function startIdleTimer() {
-    clearIdleTimer();
-    if (!state.idleMode || !state.dockEdge || hovering || panel.contains(document.activeElement) || interactionOpen()) return;
+  function pageActive() { return windowFocused && !document.hidden; }
+  function panelEngaged() { return pageActive() && (hovering || panel?.contains(document.activeElement)); }
+  function clearIdleTimer() {
+    clearTimeout(idleTimer); idleTimer = null; idleDeadline = null; idleGeneration++;
+  }
+  function startIdleTimer(restart = false) {
+    if (restart) clearIdleTimer();
+    if (!state.idleMode || !state.dockEdge || idleActive || panelEngaged() || interactionOpen()) {
+      clearIdleTimer(); return;
+    }
+    // Keep the same deadline across window focus and visibility changes.
+    if (idleDeadline === null) idleDeadline = Date.now() + state.idleSec * 1000;
+    const remaining = idleDeadline - Date.now();
+    if (remaining <= 0) {
+      clearIdleTimer(); idleActive = true; layout(); return;
+    }
+    if (idleTimer !== null) return;
     const generation = idleGeneration;
     idleTimer = setTimeout(() => {
-      if (generation !== idleGeneration || hovering || interactionOpen() || panel.contains(document.activeElement)) return;
-      idleActive = true;
-      layout();
-    }, state.idleSec * 1000);
+      if (generation !== idleGeneration) return;
+      idleTimer = null; startIdleTimer();
+    }, remaining);
   }
   function wake() { clearIdleTimer(); idleActive = false; layout(); }
   function toggleIdleMode() {
@@ -429,8 +450,8 @@
   function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
 
   function describeBinding(e) {
-    if (e.isComposing || e.keyCode === 229 || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey ||
-        ['Control', 'Alt', 'Meta', 'Shift', 'AltGraph', 'Dead', 'Process'].includes(e.key)) return '';
+    if (e.altKey || e.ctrlKey || e.metaKey ||
+        ['Control', 'Alt', 'Meta', 'Shift', 'AltGraph'].includes(e.key)) return '';
     if (e.type === 'mousedown' || e.type === 'mouseup' || e.type === 'auxclick') return describeMouseButton(e.button);
     const key = e.key;
     const code = e.code || '';
@@ -438,10 +459,15 @@
       ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→',
       Escape: 'Esc', ' ': 'Space'
     };
-    if (map[key]) return map[key];
-    if (/^Numpad/.test(code)) return describeNumpad(code);
+    if (!e.isComposing && e.keyCode !== 229 && map[key]) return map[key];
+    if (/^Numpad(?:[0-9]|Add|Subtract|Multiply|Divide|Decimal|Enter)$/.test(code)) return describeNumpad(code);
     if (/^Key[A-Z]$/.test(code)) return code.slice(3);
     if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+    if (/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(code)) return code;
+    if (map[code]) return map[code];
+    if (['Space', 'Enter', 'Tab', 'Backspace', 'Delete', 'Insert', 'Home', 'End', 'PageUp', 'PageDown'].includes(code)) return code;
+    if (e.isComposing || e.keyCode === 229 || ['Dead', 'Process'].includes(key)) return '';
+    if (map[key]) return map[key];
     if (/^F\d{1,2}$/.test(key)) return key;
     if (key && key.length === 1) return key.toUpperCase();
     return key || code || '';
@@ -473,9 +499,10 @@
     return map[code] || ('Num' + code.replace('Numpad', ''));
   }
 
-  function bindingTargetBlocked(target) {
+  function bindingTargetBlocked(target, keyboard) {
     return !!(document.getElementById('gbf-dialog-overlay') || document.getElementById('gbf-ctx') ||
-      target?.isContentEditable || target?.closest?.('input,button,select,textarea,#gbf-panel,#gbf-dialog-overlay,#gbf-ctx'));
+      target?.isContentEditable || target?.closest?.('input,button,select,textarea,.settings,#gbf-dialog-overlay,#gbf-ctx') ||
+      (!keyboard && target?.closest?.('#gbf-panel')));
   }
 
   function findBinding(text) {
@@ -492,14 +519,19 @@
 
   function bindShortcuts() {
     function trigger(event) {
-      if (!state.keymapEnabled || event.repeat || drag || Date.now() < suppressClickUntil || bindingTargetBlocked(event.target)) return;
+      const keyboard = event.type === 'keydown';
+      if (!state.keymapEnabled || event.repeat || drag || Date.now() < suppressClickUntil || bindingTargetBlocked(event.target, keyboard)) return;
+      // Capture runs before makeAction: reserve its activation keys explicitly.
+      if (keyboard && (event.key === 'Enter' || event.key === ' ' || event.code === 'Enter' || event.code === 'NumpadEnter' || event.code === 'Space') &&
+          event.target?.closest?.('#gbf-panel [role=button]')) return;
       const item = findBinding(describeBinding(event));
       if (!item) return;
+      if (!safeURL(item.url)) { navigate(item); return; }
       if (event.cancelable) event.preventDefault();
       event.stopPropagation();
       navigate(item);
     }
-    document.addEventListener('keydown', trigger);
+    window.addEventListener('keydown', trigger, true);
     document.addEventListener('mouseup', trigger);
   }
 
@@ -519,7 +551,7 @@
         <span>开启按键映射</span>
       </label>`;
     box.querySelector('#op').oninput   = () => { state.opacity = +box.querySelector('#op').value;   box.querySelector('#opv').textContent=state.opacity;   layout(); saveState(); };
-    box.querySelector('#idle').oninput = () => { state.idleSec = +box.querySelector('#idle').value; box.querySelector('#iv').textContent=state.idleSec; saveState(); startIdleTimer(); };
+    box.querySelector('#idle').oninput = () => { state.idleSec = +box.querySelector('#idle').value; box.querySelector('#iv').textContent=state.idleSec; saveState(); startIdleTimer(true); };
     box.querySelector('#op').setAttribute('aria-label', '透明度');
     box.querySelector('#idle').setAttribute('aria-label', '待机秒数');
     layout();
@@ -528,8 +560,11 @@
 
   /* ─── create ────────────────────────────────────── */
   function create() {
+    // Restore only the intent; layout measures content before the first visible frame.
+    idleActive = state.collapsed;
     panel = document.createElement('div'); panel.id = 'gbf-panel';
-    panel.innerHTML = '<div class="panel-shell"><div class="title">GBF Tools</div>' +
+    panel.innerHTML = '<div class="panel-shell"><div class="panel-header"><div class="title">GBF Tools</div>' +
+      '<button type="button" class="pin"><svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l-1 7 4 4v2H6v-2l4-4-1-7zM12 16v5"/></svg></button></div>' +
       '<div class="panel-content"><div class="tabs"><span data-tab="main">主</span>' +
       '<span data-tab="raid">副本</span></div><div class="menu"></div><div class="settings"></div></div></div>';
     // Outside the game body: body transforms/zoom must not become the fixed containing block.
@@ -537,14 +572,32 @@
     makeAction(panel.querySelector('.title'));
     panel.querySelectorAll('.tabs span').forEach(makeAction);
     bind(panel); render(panel);
-    const observer = new ResizeObserver(scheduleLayout);
-    observer.observe(panel.querySelector('.panel-shell'));
-    observer.observe(document.documentElement);
+    let observer;
+    try {
+      observer = new ResizeObserver(scheduleLayout);
+      observer.observe(panel.querySelector('.panel-shell'));
+      observer.observe(document.documentElement);
+    } catch (error) {
+      observer?.disconnect();
+      notify('面板尺寸监听不可用，窗口缩放及收纳功能仍可使用：' + error.message);
+    }
     startIdleTimer();
   }
 
   function bind(el) {
     const title = el.querySelector('.title');
+    const pin = el.querySelector('.pin');
+    pin.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || !event.isPrimary) return;
+      if (el.contains(document.activeElement)) document.activeElement.blur();
+      event.preventDefault();
+    });
+    pin.addEventListener('click', () => {
+      if (Date.now() < suppressClickUntil) return;
+      endDrag();
+      state.pinned = !state.pinned;
+      layout(); saveState(); startIdleTimer();
+    });
     function endDrag() {
       if (!drag) return;
       const completed = drag; drag = null;
@@ -562,11 +615,12 @@
     el.addEventListener('pointerdown', event => {
       if (event.button !== 0 || !event.isPrimary || event.target.closest('input,button,select,textarea,.settings')) return;
       wake();
-      drag = { id: event.pointerId, px: event.clientX, py: event.clientY, x: state.x, y: state.y,
-        moved: false, userSelect: document.body.style.userSelect };
       // Focus remains available for keyboard users; mouse clicks must not pin the panel open.
       if (el.contains(document.activeElement)) document.activeElement.blur();
       event.preventDefault();
+      if (state.pinned) return;
+      drag = { id: event.pointerId, px: event.clientX, py: event.clientY, x: state.x, y: state.y,
+        moved: false, userSelect: document.body.style.userSelect };
     });
     window.addEventListener('pointermove', event => {
       if (!drag || event.pointerId !== drag.id) return;
@@ -580,14 +634,29 @@
     window.addEventListener('pointerup', event => { if (event.pointerId === drag?.id) endDrag(); });
     window.addEventListener('pointercancel', event => { if (event.pointerId === drag?.id) endDrag(); });
     el.addEventListener('lostpointercapture', endDrag);
-    window.addEventListener('blur', () => { endDrag(); hovering = false; clearIdleTimer(); });
-    window.addEventListener('focus', () => { hovering = el.matches(':hover'); layout(); startIdleTimer(); });
-    el.addEventListener('mouseenter', () => { hovering = true; clearIdleTimer(); layout(); });
+    function updateActivity() {
+      if (!pageActive()) {
+        hovering = false;
+        if (!state.collapsed) idleActive = false;
+        endDrag();
+      } else hovering = el.matches(':hover');
+      startIdleTimer(); layout();
+    }
+    window.addEventListener('blur', () => { windowFocused = false; updateActivity(); });
+    window.addEventListener('focus', () => { windowFocused = true; updateActivity(); });
+    document.addEventListener('visibilitychange', () => { windowFocused = document.hasFocus(); updateActivity(); });
+    el.addEventListener('mouseenter', () => { hovering = true; if (pageActive()) clearIdleTimer(); layout(); });
     el.addEventListener('mouseleave', () => { hovering = false; layout(); startIdleTimer(); });
-    el.addEventListener('focusin', () => { clearIdleTimer(); layout(); });
+    el.addEventListener('focusin', () => { if (pageActive()) clearIdleTimer(); layout(); });
     el.addEventListener('focusout', () => { requestAnimationFrame(() => { layout(); startIdleTimer(); }); });
     title.addEventListener('click', () => { if (Date.now() >= suppressClickUntil) toggleIdleMode(); });
     title.addEventListener('contextmenu', event => { event.preventDefault(); wake(); toggleSettings(el); });
+    function onPageNavigation() {
+      if (state.collapsed) return;
+      wake(); startIdleTimer();
+    }
+    window.addEventListener('hashchange', onPageNavigation);
+    window.addEventListener('popstate', onPageNavigation);
     window.addEventListener('resize', scheduleLayout);
   }
 
@@ -597,8 +666,13 @@
     s.textContent = `
 #gbf-panel{position:fixed;left:0;top:0;width:${PANEL_W}px;visibility:hidden;background:#1e1e1e;color:#fff;font:12px Arial,sans-serif;z-index:999999;border-radius:6px;box-shadow:0 6px 18px #0005;overflow:hidden;touch-action:none;box-sizing:border-box;}
 #gbf-panel .panel-shell{width:${PANEL_W}px;display:flex;flex-direction:column;box-sizing:border-box;}
-#gbf-panel .title{flex:none;background:#333;padding:6px;text-align:center;cursor:grab;border-radius:0 0 4px 4px;font-weight:bold;user-select:none;}
+#gbf-panel .panel-header{display:flex;flex:none;background:#333;border-radius:0 0 4px 4px;overflow:hidden;}
+#gbf-panel .title{flex:1;min-width:0;background:#333;padding:6px;text-align:center;cursor:grab;border-radius:0 0 4px 4px;font-weight:bold;user-select:none;}
 #gbf-panel .title.idle-mode-on{color:#00bfff;background:linear-gradient(135deg,#333,#004466);}
+#gbf-panel .pin{display:flex;align-items:center;justify-content:center;flex:none;width:26px;margin:0;padding:0;border:0;background:transparent;color:#aaa;cursor:pointer;}
+#gbf-panel .pin[aria-pressed=true]{color:#00bfff;}
+#gbf-panel[data-pinned=true] .title{cursor:pointer;}
+#gbf-panel .pin:focus-visible{outline:2px solid #00bfff;outline-offset:-2px;}
 #gbf-panel .panel-content{min-height:0;overflow:auto;padding-top:3px;}
 #gbf-panel [role=button]:focus-visible{outline:2px solid #00bfff;outline-offset:-2px;}
 #gbf-panel .item{overflow-wrap:anywhere;}
@@ -636,6 +710,6 @@
     document.head.appendChild(s);
   }
 
-  function init() { load(); style(); create(); bindShortcuts(); bindStorage(); }
+  function init() { load(); bindShortcuts(); style(); create(); bindStorage(); }
   init();
 })();

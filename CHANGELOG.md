@@ -1,5 +1,9 @@
 # Changelog
 
+## v7.1.10
+- Add a pin button to lock panel position.
+- Preserve panel state across navigation and fix auto-hide when unfocused.
+
 ## v7.1.9
 - Fix panel sizing, docking and dragging issues.
 - Improve storage and shortcut handling.
