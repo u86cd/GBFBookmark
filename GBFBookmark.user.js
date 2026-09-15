@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GBF Panel Pro
 // @namespace    gbf.panel.pro
-// @version      7.1.10
+// @version      7.1.11
 // @match        *://steam.granbluefantasy.com/*
 // @match        *://gbf.game.mbga.jp/*
 // @match        *://game.granbluefantasy.jp/*
@@ -20,9 +20,11 @@
   const IDLE_THIN = 13;
   const DOCK_SNAP = 6;
   const EDGES = ['left', 'right', 'top', 'bottom'];
+  const DEFAULT_TAB_NAMES = { main: '主', raid: '副本' };
   const state = { x: 50, y: 120, activeList: 'raid', dockEdge: null,
     opacity: 100, idleSec: 5, idleMode: false, keymapEnabled: false, collapsed: false, pinned: false };
   let data = {
+    tabNames: { ...DEFAULT_TAB_NAMES },
     main: [{ name: '首页', url: '#mypage', keymap: '' }],
     raid: [{ name: 'EX+', url: '#quest/ex', keymap: '' }, { name: 'HELL', url: '#quest/hell', keymap: '' }]
   };
@@ -33,7 +35,12 @@
   let dialogReturnFocus = null;
   let lastWidth = PANEL_W, lastHeight = 0;
 
-  function notify(message) {
+  function clearNotice(scope) {
+    const notice = document.getElementById('gbf-notice');
+    if (notice?.dataset.scope === scope) notice.remove();
+  }
+
+  function notify(message, scope = 'system') {
     let notice = document.getElementById('gbf-notice');
     if (!notice) {
       notice = document.createElement('div');
@@ -42,14 +49,32 @@
       notice.style.cssText = 'position:fixed;top:8px;left:8px;max-width:420px;padding:10px;background:#522;color:white;z-index:10000001;font:13px sans-serif;';
       document.documentElement.appendChild(notice);
     }
-    notice.textContent = message;
+    notice.dataset.scope = scope;
+    const text = document.createElement('span'); text.textContent = message;
+    const close = document.createElement('button');
+    close.type = 'button'; close.textContent = '×'; close.setAttribute('aria-label', '關閉提示');
+    close.style.cssText = 'margin-left:8px;cursor:pointer;';
+    close.onclick = () => {
+      const focused = document.activeElement === close;
+      notice.remove();
+      if (focused) (document.querySelector('#gbf-d-name') || panel?.querySelector('.title'))?.focus();
+    };
+    close.onkeydown = event => {
+      const overlay = document.getElementById('gbf-dialog-overlay');
+      if (overlay && event.key === 'Tab') {
+        event.preventDefault();
+        overlay.querySelector(event.shiftKey ? '#gbf-d-ok' : '#gbf-d-name').focus();
+      }
+    };
+    notice.replaceChildren(text, close);
     return false;
   }
 
   function normalizeData(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('书签数据格式错误');
-    const result = { main: [], raid: [] };
+    const result = { main: [], raid: [], tabNames: { ...DEFAULT_TAB_NAMES } };
     for (const list of ['main', 'raid']) {
+      if (typeof value.tabNames?.[list] === 'string' && value.tabNames[list].trim()) result.tabNames[list] = value.tabNames[list].trim();
       if (!Array.isArray(value[list])) continue;
       result[list] = value[list].filter(item => item && typeof item === 'object' &&
         typeof item.name === 'string' && typeof item.url === 'string').map(item => ({
@@ -95,22 +120,23 @@
 
   function saveState() {
     if (storageBlocked) return notify('数据读取失败，暂时无法保存。原始数据未被覆盖。');
-    try { localStorage.setItem(STATE_KEY, JSON.stringify(state)); return true; }
-    catch (error) { return notify('设置保存失败：' + error.message); }
+    try { localStorage.setItem(STATE_KEY, JSON.stringify(state)); clearNotice('state'); return true; }
+    catch (error) { return notify('设置保存失败：' + error.message, 'state'); }
   }
 
   function saveData(next, expected) {
     if (storageBlocked) return notify('数据读取失败，暂时无法保存。原始数据未被覆盖。');
     try {
-      if (localStorage.getItem(DATA_KEY) !== expected) return notify('其他分页已修改书签。输入已保留，请关闭后重新打开编辑。');
+      if (localStorage.getItem(DATA_KEY) !== expected) return notify('其他分页已修改书签。输入已保留，请关闭后重新打开编辑。', 'data');
       const raw = JSON.stringify(next);
       // ponytail: simultaneous edits are last-write-wins; transactional storage if collaborative editing is needed.
       localStorage.setItem(DATA_KEY, raw);
       data = next;
       dataSnapshot = raw;
+      clearNotice('data');
       render(panel);
       return true;
-    } catch (error) { return notify('书签保存失败，输入已保留：' + error.message); }
+    } catch (error) { return notify('书签保存失败，输入已保留：' + error.message, 'data'); }
   }
 
   function bindStorage() {
@@ -123,7 +149,7 @@
         dataSnapshot = raw;
         removeCtxMenu();
         render(panel);
-        if (dialogSnapshot !== null) notify('其他分页已修改书签。当前输入已保留，请关闭后重新打开编辑。');
+        if (dialogSnapshot !== null) notify('其他分页已修改书签。当前输入已保留，请关闭后重新打开编辑。', 'data');
       } catch (error) { storageBlocked = true; notify('同步失败，暂停保存：' + error.message); }
     });
   }
@@ -207,7 +233,7 @@
     return !!(drag || settingsOpen || document.getElementById('gbf-dialog-overlay') || document.getElementById('gbf-ctx'));
   }
   function pageActive() { return windowFocused && !document.hidden; }
-  function panelEngaged() { return pageActive() && (hovering || panel?.contains(document.activeElement)); }
+  function panelEngaged() { return !document.hidden && (hovering || (windowFocused && panel?.contains(document.activeElement))); }
   function clearIdleTimer() {
     clearTimeout(idleTimer); idleTimer = null; idleDeadline = null; idleGeneration++;
   }
@@ -268,6 +294,9 @@
     add.onclick = () => { if (Date.now() >= suppressClickUntil) showAddDialog(el); };
     box.appendChild(add);
     el.querySelectorAll('.tabs span').forEach(tab => {
+      tab.textContent = data.tabNames[tab.dataset.tab];
+      tab.title = tab.textContent;
+      tab.oncontextmenu = event => { event.preventDefault(); event.stopPropagation(); showCtxMenu(event, null, el, tab.dataset.tab); };
       tab.classList.toggle('active', tab.dataset.tab === state.activeList);
       tab.setAttribute('aria-pressed', String(tab.dataset.tab === state.activeList));
       tab.onclick = () => {
@@ -279,13 +308,13 @@
   }
 
   /* ─── context menu ──────────────────────────────── */
-  function showCtxMenu(e, idx, panelEl) {
+  function showCtxMenu(e, idx, panelEl, tabName = null) {
     removeCtxMenu();
     wake();
     const listName = state.activeList, expected = dataSnapshot;
     const menu = document.createElement('div');
     menu.id = 'gbf-ctx';
-    menu.innerHTML = `<div class="ctx-item" id="ctx-edit">✏️ 编辑</div>
+    menu.innerHTML = tabName ? '<div class="ctx-item" id="ctx-rename">自定義標籤名</div>' : `<div class="ctx-item" id="ctx-edit">✏️ 编辑</div>
                       <div class="ctx-item ctx-del" id="ctx-del">🗑️ 删除</div>`;
     menu.style.cssText = 'position:fixed;z-index:9999999;background:#2a2a2a;border:1px solid #555;' +
       'border-radius:5px;padding:3px 0;min-width:100px;font-size:12px;color:#fff;' +
@@ -299,26 +328,50 @@
     const scale = mr.width / menu.offsetWidth || 1;
     menu.style.left = (Math.max(0, mx) - mr.left) / scale + 'px';
     menu.style.top = (Math.max(0, my) - mr.top) / scale + 'px';
-    menu.querySelector('#ctx-edit').onclick = () => { removeCtxMenu(); showEditDialog(idx, panelEl); };
-    menu.querySelector('#ctx-del').onclick  = () => {
-      removeCtxMenu();
-      const next = structuredClone(data);
-      next[listName].splice(idx, 1);
-      saveData(next, expected);
-    };
+    const returnTarget = tabName ? panelEl.querySelector('[data-tab="' + tabName + '"]') : panel.querySelector('.title');
+    if (tabName) menu.querySelector('#ctx-rename').onclick = () => { removeCtxMenu(); showRenameDialog(tabName, returnTarget); };
+    else {
+      menu.querySelector('#ctx-edit').onclick = () => { removeCtxMenu(); showEditDialog(idx, panelEl); };
+      menu.querySelector('#ctx-del').onclick  = () => {
+        removeCtxMenu();
+        const next = structuredClone(data);
+        next[listName].splice(idx, 1);
+        saveData(next, expected);
+      };
+    }
     menu.querySelectorAll('.ctx-item').forEach(makeAction);
     menu.querySelector('.ctx-item').focus();
-    menu.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); removeCtxMenu(); panel.querySelector('.title').focus(); } });
+    menu.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); removeCtxMenu(); returnTarget.focus(); } });
     setTimeout(() => document.addEventListener('click', removeCtxMenu, { once: true }), 0);
   }
   function removeCtxMenu() { document.getElementById('gbf-ctx')?.remove(); if (panel) startIdleTimer(); }
 
   /* ─── dialogs ───────────────────────────────────── */
+  function validateKeymap(keymap, listName, index = -1) {
+    if (!keymap) return true;
+    for (const list of ['main', 'raid']) {
+      const conflict = data[list].find((item, i) => !(list === listName && i === index) && item.keymap === keymap);
+      if (conflict) return notify('此按鍵已用於「' + data.tabNames[list] + '／' + conflict.name + '」，請更換或清空映射。', 'input');
+    }
+    return true;
+  }
+
+  function showRenameDialog(tabName, returnFocus) {
+    const expected = dataSnapshot;
+    showDialog({ title: '自定義標籤名', name: data.tabNames[tabName], nameOnly: true, returnFocus,
+      onConfirm(name) {
+        const next = structuredClone(data);
+        next.tabNames[tabName] = name || DEFAULT_TAB_NAMES[tabName];
+        return saveData(next, expected);
+      } });
+  }
+
   function showEditDialog(idx, panelEl) {
     const listName = state.activeList, item = data[listName][idx], expected = dataSnapshot;
     if (!item) return;
     showDialog({ title: '编辑书签', name: item.name, url: item.url, keymap: item.keymap,
       onConfirm(name, url, keymap) {
+        if (!validateKeymap(keymap, listName, idx)) return false;
         const next = structuredClone(data); next[listName][idx] = { name, url, keymap };
         return saveData(next, expected);
       } });
@@ -327,15 +380,17 @@
     const listName = state.activeList, expected = dataSnapshot;
     showDialog({ title: '添加书签', name: document.title || '', url: location.hash || location.href,
       onConfirm(name, url, keymap) {
+        if (!validateKeymap(keymap, listName)) return false;
         const next = structuredClone(data); next[listName].push({ name, url, keymap });
         return saveData(next, expected);
       } });
   }
 
-  function showDialog({ title, name, url, keymap = '', onConfirm }) {
+  function showDialog({ title, name, url = '', keymap = '', onConfirm, nameOnly = false, returnFocus }) {
     removeDialog();
-    dialogReturnFocus = document.activeElement;
+    dialogReturnFocus = returnFocus || document.activeElement;
     dialogSnapshot = dataSnapshot;
+    clearNotice('input');
     wake();
     const overlay = document.createElement('div');
     overlay.id = 'gbf-dialog-overlay';
@@ -365,6 +420,7 @@
         </div>
         <div style="margin-bottom:12px;">
           <div style="margin-bottom:4px;color:#aaa;font-size:11px;">按键映射</div>
+          <div id="gbf-keymap-status" style="max-width:300px;margin-bottom:6px;font-size:11px;color:#aaa;">${state.keymapEnabled ? '按鍵映射已啟用' : '按鍵映射尚未啟用；可在右鍵標題的設定中開啟。'}</div>
           <input id="gbf-d-key" type="text" value="${esc(keymap)}" readonly
             placeholder="点击后按键"
             style="width:74px;height:30px;box-sizing:border-box;padding:5px 7px;border:1px solid #555;
@@ -423,8 +479,9 @@
       if (event.key !== 'Tab') return;
       const items = [...overlay.querySelectorAll('input,button,[tabindex="0"]')];
       const first = items[0], last = items[items.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      const noticeClose = document.querySelector('#gbf-notice button');
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); (noticeClose || last).focus(); }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); (noticeClose || first).focus(); }
     });
     [ni, ui, ki].forEach((input, index) => input.setAttribute('aria-label', ['名称', '网址', '按键映射'][index]));
     makeAction(overlay.querySelector('#gbf-d-fill'));
@@ -432,17 +489,26 @@
     overlay.querySelector('#gbf-d-cancel').onclick = removeDialog;
     overlay.querySelector('#gbf-d-ok').onclick     = () => {
       const n=ni.value.trim(), u=ui.value.trim();
-      if (!n || !u) return notify('请填写名称和网址。');
-      if (!safeURL(u)) return notify('仅支持 HTTP(S)、相对网址或 # 游戏路径。');
+      if (nameOnly) { if (onConfirm(n)) removeDialog(); return; }
+      if (!n || !u) return notify('请填写名称和网址。', 'input');
+      if (!safeURL(u)) return notify('仅支持 HTTP(S)、相对网址或 # 游戏路径。', 'input');
       if (onConfirm(n, u, keyValue.trim())) removeDialog();
     };
     overlay.addEventListener('click', e => { if (e.target===overlay) removeDialog(); });
+    if (nameOnly) {
+      ui.parentElement.remove(); ki.parentElement.remove();
+      const hint = document.createElement('div'); hint.textContent = '留空恢復預設名稱';
+      hint.style.cssText = 'margin-top:6px;color:#aaa;font-size:11px;'; ni.after(hint);
+      ni.setAttribute('aria-label', '標籤名');
+      overlay.querySelector('#gbf-d-cancel').textContent = '取消';
+      overlay.querySelector('#gbf-d-ok').textContent = '確定';
+    }
     ni.focus(); ni.select();
   }
   function removeDialog() {
     const overlay = document.getElementById('gbf-dialog-overlay');
     if (!overlay) return;
-    overlay.remove(); dialogSnapshot = null;
+    overlay.remove(); dialogSnapshot = null; clearNotice('input');
     const target = dialogReturnFocus?.isConnected ? dialogReturnFocus : panel.querySelector('.title');
     target.focus({ preventScroll: true });
     dialogReturnFocus = null; startIdleTimer();
@@ -499,10 +565,9 @@
     return map[code] || ('Num' + code.replace('Numpad', ''));
   }
 
-  function bindingTargetBlocked(target, keyboard) {
+  function bindingTargetBlocked(target) {
     return !!(document.getElementById('gbf-dialog-overlay') || document.getElementById('gbf-ctx') ||
-      target?.isContentEditable || target?.closest?.('input,button,select,textarea,.settings,#gbf-dialog-overlay,#gbf-ctx') ||
-      (!keyboard && target?.closest?.('#gbf-panel')));
+      target?.isContentEditable || target?.closest?.('input,select,textarea,#gbf-panel,#gbf-dialog-overlay,#gbf-ctx,#gbf-notice'));
   }
 
   function findBinding(text) {
@@ -518,21 +583,51 @@
   }
 
   function bindShortcuts() {
-    function trigger(event) {
-      const keyboard = event.type === 'keydown';
-      if (!state.keymapEnabled || event.repeat || drag || Date.now() < suppressClickUntil || bindingTargetBlocked(event.target, keyboard)) return;
-      // Capture runs before makeAction: reserve its activation keys explicitly.
-      if (keyboard && (event.key === 'Enter' || event.key === ' ' || event.code === 'Enter' || event.code === 'NumpadEnter' || event.code === 'Space') &&
-          event.target?.closest?.('#gbf-panel [role=button]')) return;
-      const item = findBinding(describeBinding(event));
-      if (!item) return;
-      if (!safeURL(item.url)) { navigate(item); return; }
-      if (event.cancelable) event.preventDefault();
-      event.stopPropagation();
-      navigate(item);
+    const keys = new Map(), buttons = new Map();
+    let snapshot = dataSnapshot, enabled = state.keymapEnabled;
+    function reset() { keys.clear(); buttons.clear(); }
+    function mapped(event, text) {
+      if (!state.keymapEnabled || event.ctrlKey || event.altKey || event.metaKey || drag || Date.now() < suppressClickUntil || bindingTargetBlocked(event.target)) return null;
+      const item = findBinding(text);
+      return item && safeURL(item.url) ? item : null;
     }
-    window.addEventListener('keydown', trigger, true);
-    document.addEventListener('mouseup', trigger);
+    function intercept(event) {
+      if (snapshot !== dataSnapshot || enabled !== state.keymapEnabled) {
+        reset(); snapshot = dataSnapshot; enabled = state.keymapEnabled;
+      }
+      const type = event.type, pointer = type.startsWith('pointer');
+      if ((pointer && event.pointerType !== 'mouse') || event.sourceCapabilities?.firesTouchEvents) return;
+      if (type === 'pointercancel') { buttons.clear(); return; }
+      const keyboard = type === 'keydown' || type === 'keyup';
+      const text = keyboard ? describeBinding(event) : describeMouseButton(event.button);
+      const held = keyboard ? keys.get(event.code || text) : null;
+      const item = mapped(event, type === 'keyup' && held && !event.ctrlKey && !event.altKey && !event.metaKey ? held.keymap : text);
+      let trigger = false;
+      if (keyboard) {
+        const id = event.code || text;
+        if (type === 'keydown' && !event.repeat) { keys.set(id, item); trigger = !!item; }
+        const pressed = keys.get(id);
+        if (type === 'keyup') keys.delete(id);
+        if (!item || pressed !== item) return;
+      } else {
+        if (type === 'pointerdown' || type === 'mousedown') buttons.set(event.button, { item, released: false });
+        const pressed = buttons.get(event.button);
+        if (!item || pressed?.item !== item) {
+          if (type === 'mouseup') buttons.delete(event.button);
+          return;
+        }
+        if (type === 'mouseup' && !pressed.released) { pressed.released = true; trigger = true; }
+      }
+      // Cancel compatibility mouse defaults on mousedown; cancelling pointerdown would suppress mouseup.
+      if (!pointer && event.cancelable) event.preventDefault();
+      event.stopImmediatePropagation();
+      if (trigger) navigate(item);
+    }
+    for (const type of ['keydown', 'keyup', 'pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu']) {
+      window.addEventListener(type, intercept, true);
+    }
+    window.addEventListener('blur', reset);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) reset(); });
   }
 
   /* ─── settings ──────────────────────────────────── */
@@ -607,7 +702,7 @@
       }
       if (el.hasPointerCapture(completed.id)) el.releasePointerCapture(completed.id);
       document.body.style.userSelect = completed.userSelect;
-      hovering = el.matches(':hover');
+      hovering = pageActive() && el.matches(':hover');
       layout();
       if (completed.moved) saveState();
       startIdleTimer();
@@ -645,18 +740,12 @@
     window.addEventListener('blur', () => { windowFocused = false; updateActivity(); });
     window.addEventListener('focus', () => { windowFocused = true; updateActivity(); });
     document.addEventListener('visibilitychange', () => { windowFocused = document.hasFocus(); updateActivity(); });
-    el.addEventListener('mouseenter', () => { hovering = true; if (pageActive()) clearIdleTimer(); layout(); });
+    el.addEventListener('mouseenter', () => { hovering = true; if (!document.hidden) clearIdleTimer(); layout(); });
     el.addEventListener('mouseleave', () => { hovering = false; layout(); startIdleTimer(); });
     el.addEventListener('focusin', () => { if (pageActive()) clearIdleTimer(); layout(); });
     el.addEventListener('focusout', () => { requestAnimationFrame(() => { layout(); startIdleTimer(); }); });
     title.addEventListener('click', () => { if (Date.now() >= suppressClickUntil) toggleIdleMode(); });
     title.addEventListener('contextmenu', event => { event.preventDefault(); wake(); toggleSettings(el); });
-    function onPageNavigation() {
-      if (state.collapsed) return;
-      wake(); startIdleTimer();
-    }
-    window.addEventListener('hashchange', onPageNavigation);
-    window.addEventListener('popstate', onPageNavigation);
     window.addEventListener('resize', scheduleLayout);
   }
 
@@ -677,7 +766,7 @@
 #gbf-panel [role=button]:focus-visible{outline:2px solid #00bfff;outline-offset:-2px;}
 #gbf-panel .item{overflow-wrap:anywhere;}
 #gbf-panel .tabs{display:flex;gap:4px;background:#1e1e1e;padding:0 3px 3px;}
-#gbf-panel .tabs span{flex:1;text-align:center;padding:5px;background:#444;cursor:pointer;border-radius:4px;}
+#gbf-panel .tabs span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;padding:5px;background:#444;cursor:pointer;border-radius:4px;}
 #gbf-panel .tabs span.active{background:#fff;color:#000;}
 #gbf-panel .menu{padding:0;}
 #gbf-panel .item{display:block;width:100%;box-sizing:border-box;background:#555;margin:0;padding:6px;text-align:center;cursor:pointer;border-radius:0;border-bottom:2px solid #1e1e1e;transition:background .2s;}
