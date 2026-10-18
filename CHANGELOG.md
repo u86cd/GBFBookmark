@@ -1,5 +1,10 @@
 # Changelog
 
+## v7.1.12
+- Add interface settings to hide the left and right game toolbars.
+- Add custom panel titles and switch default text to Traditional Chinese.
+- Rename the script to GBFBookmark with Bookmark as the default panel title.
+
 ## v7.1.11
 - Suppress original actions for mapped keys and mouse buttons outside inputs and the panel.
 - Add custom tab names and prevent duplicate shortcut bindings.
